@@ -17,6 +17,8 @@ env:
   DOTNET_VERSION: '10.0.x'
   PROJECT_PATH: 'RequestResult.csproj'
   NUGET_SOURCE: 'https://api.nuget.org/v3/index.json'
+  MAJOR_VERSION: '1'
+  MINOR_VERSION: '0'
 
 jobs:
   build:
@@ -59,8 +61,8 @@ jobs:
           **/bin/Release/**/*.nupkg
           **/bin/Release/**/*.snupkg
 
-  publish-nuget:
-    name: Publish to NuGet
+  publish-nuget-tag:
+    name: Publish Tagged Release to NuGet
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -105,11 +107,11 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-nuget-prerelease:
-    name: Publish Pre-release to NuGet
+  publish-nuget-main:
+    name: Publish Main Branch to NuGet (Auto-versioned)
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
     
     steps:
     - name: Checkout code
@@ -122,23 +124,93 @@ jobs:
       with:
         dotnet-version: ${{ env.DOTNET_VERSION }}
     
-    - name: Generate version
-      id: get_version
+    - name: Generate version number
+      id: version
       run: |
-        VERSION="1.0.0-beta.${{ github.run_number }}"
+        # Use run number as patch version for auto-incrementing
+        VERSION="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}"
         echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-        echo "Pre-release version: $VERSION"
+        echo "📦 Publishing version: $VERSION"
     
     - name: Restore dependencies
       run: dotnet restore ${{ env.PROJECT_PATH }}
     
     - name: Build
-      run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore /p:Version=${{ steps.get_version.outputs.VERSION }}
+      run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore /p:Version=${{ steps.version.outputs.VERSION }}
     
     - name: Pack
-      run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release --no-build --output ./artifacts /p:PackageVersion=${{ steps.get_version.outputs.VERSION }}
+      run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release --no-build --output ./artifacts /p:PackageVersion=${{ steps.version.outputs.VERSION }}
     
     - name: Publish to NuGet
       run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source ${{ env.NUGET_SOURCE }} --skip-duplicate
       env:
         NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    
+    - name: Create Git Tag
+      run: |
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git tag "v${{ steps.version.outputs.VERSION }}"
+        git push origin "v${{ steps.version.outputs.VERSION }}"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.VERSION }}
+        name: Release v${{ steps.version.outputs.VERSION }}
+        files: ./artifacts/*.nupkg
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-nuget-develop:
+    name: Publish Pre-release to NuGet (Auto-versioned)
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop' && !startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Generate pre-release version
+      id: version
+      run: |
+        # Generate pre-release version with run number
+        VERSION="${{ env.MAJOR_VERSION }}.${{ env.MINOR_VERSION }}.${{ github.run_number }}-beta"
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "📦 Publishing pre-release version: $VERSION"
+    
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.PROJECT_PATH }}
+    
+    - name: Build
+      run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore /p:Version=${{ steps.version.outputs.VERSION }}
+    
+    - name: Pack
+      run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release --no-build --output ./artifacts /p:PackageVersion=${{ steps.version.outputs.VERSION }}
+    
+    - name: Publish to NuGet
+      run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source ${{ env.NUGET_SOURCE }} --skip-duplicate
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    
+    - name: Comment on commit with version
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.repos.createCommitComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            commit_sha: context.sha,
+            body: '📦 Published pre-release version `${{ steps.version.outputs.VERSION }}` to NuGet'
+          })
